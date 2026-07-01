@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+data/raw/*
+data/processed/*.parquet
+data/processed/*.csv
+!data/processed/.gitkeep
+site/
+*.zip
+.DS_Store

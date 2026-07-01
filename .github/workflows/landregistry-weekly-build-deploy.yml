@@ -1,0 +1,147 @@
+name: LandRegistry Weekly Build Deploy Email
+
+on:
+  workflow_dispatch:
+    inputs:
+      postcode_prefixes:
+        description: "Postcode prefixes, e.g. BN or BN RH TN or ALL"
+        required: false
+        default: "BN"
+      years:
+        description: "Years to analyse, e.g. 2025 2026"
+        required: false
+        default: "2025 2026"
+      standard_only:
+        description: "Only standard Price Paid transactions"
+        type: choice
+        required: true
+        default: "true"
+        options: ["true", "false"]
+      deploy:
+        description: "Deploy to Hostinger"
+        type: boolean
+        required: true
+        default: false
+      send_email:
+        description: "Send email summary after build"
+        type: boolean
+        required: true
+        default: false
+  schedule:
+    - cron: "15 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build LandRegistry site
+        run: |
+          set -euo pipefail
+          YEARS="${{ github.event.inputs.years || '2025 2026' }}"
+          PREFIXES="${{ github.event.inputs.postcode_prefixes || 'BN' }}"
+          STANDARD="${{ github.event.inputs.standard_only || 'true' }}"
+          python scripts/run_landregistry_weekly.py             --years "$YEARS"             --postcode-prefixes "$PREFIXES"             --standard-only "$STANDARD"
+
+      - name: No blank page guard
+        run: |
+          set -euo pipefail
+          test -s site/index.html
+          test -s site/weekly.html
+          test -s site/monthly.html
+          test -s site/annual.html
+          test -s site/areas.html
+          test -s site/methodology.html
+          grep -qi "LandRegistry" site/index.html
+
+      - name: Send email summary
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.send_email == 'true' }}
+        env:
+          SMTP_LANDREGISTRY_HOST: ${{ secrets.SMTP_LANDREGISTRY_HOST }}
+          SMTP_LANDREGISTRY_PORT: ${{ secrets.SMTP_LANDREGISTRY_PORT }}
+          SMTP_LANDREGISTRY_USER: ${{ secrets.SMTP_LANDREGISTRY_USER }}
+          SMTP_LANDREGISTRY_PASSWORD: ${{ secrets.SMTP_LANDREGISTRY_PASSWORD }}
+          SMTP_LANDREGISTRY_FROM: ${{ secrets.SMTP_LANDREGISTRY_FROM }}
+          SMTP_LANDREGISTRY_TO: ${{ secrets.SMTP_LANDREGISTRY_TO }}
+          SITE_URL: https://scclandregistry.co.uk
+        run: |
+          set -euo pipefail
+          python scripts/send_weekly_email.py
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: landregistry-site
+          path: |
+            site
+            data/reports
+          retention-days: 14
+
+      - name: Install deploy clients
+        if: ${{ github.event.inputs.deploy == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass rsync lftp
+
+      - name: Deploy by SSH rsync
+        if: ${{ github.event.inputs.deploy == 'true' }}
+        id: sshdeploy
+        continue-on-error: true
+        env:
+          HOST: ${{ secrets.SCCLANDREGISTRY_SSH_HOST }}
+          USERNAME: ${{ secrets.SCCLANDREGISTRY_SSH_USERNAME }}
+          PASSWORD: ${{ secrets.SCCLANDREGISTRY_SSH_PASSWORD }}
+          PORT: ${{ secrets.SCCLANDREGISTRY_SSH_PORT }}
+          TARGET: ${{ secrets.SCCLANDREGISTRY_HOSTINGER_PUBLIC_HTML_DIR }}
+        run: |
+          set -euo pipefail
+          : "${HOST:?Missing SCCLANDREGISTRY_SSH_HOST}"
+          : "${USERNAME:?Missing SCCLANDREGISTRY_SSH_USERNAME}"
+          : "${PASSWORD:?Missing SCCLANDREGISTRY_SSH_PASSWORD}"
+          : "${TARGET:?Missing SCCLANDREGISTRY_HOSTINGER_PUBLIC_HTML_DIR}"
+          PORT="${PORT:-22}"
+          sshpass -p "$PASSWORD" ssh -p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USERNAME@$HOST" "mkdir -p '$TARGET'"
+          sshpass -p "$PASSWORD" rsync -avz --delete -e "ssh -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" site/ "$USERNAME@$HOST:$TARGET/"
+
+      - name: Deploy by FTP fallback
+        if: ${{ github.event.inputs.deploy == 'true' && steps.sshdeploy.outcome == 'failure' }}
+        env:
+          FTP_HOST: ${{ secrets.SCCLANDREGISTRY_FTP_HOST }}
+          FTP_USER: ${{ secrets.SCCLANDREGISTRY_FTP_USERNAME }}
+          FTP_PASS: ${{ secrets.SCCLANDREGISTRY_FTP_PASSWORD }}
+          FTP_PORT: ${{ secrets.SCCLANDREGISTRY_FTP_PORT }}
+          FTP_TARGET_DIR: ${{ secrets.SCCLANDREGISTRY_FTP_TARGET_DIR }}
+        run: |
+          set -euo pipefail
+          : "${FTP_HOST:?Missing SCCLANDREGISTRY_FTP_HOST}"
+          : "${FTP_USER:?Missing SCCLANDREGISTRY_FTP_USERNAME}"
+          : "${FTP_PASS:?Missing SCCLANDREGISTRY_FTP_PASSWORD}"
+          FTP_PORT="${FTP_PORT:-21}"
+          FTP_TARGET_DIR="${FTP_TARGET_DIR:-/public_html}"
+          lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow no
+          set net:timeout 20
+          set net:max-retries 2
+          mkdir -p "$FTP_TARGET_DIR"
+          mirror -R --delete --verbose site "$FTP_TARGET_DIR"
+          bye
+          EOF
