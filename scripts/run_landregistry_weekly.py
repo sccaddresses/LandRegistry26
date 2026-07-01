@@ -23,6 +23,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from pandas.errors import EmptyDataError
 import requests
 import yaml
 
@@ -68,22 +69,39 @@ def mkdirs(*paths: Path) -> None:
 
 
 def parse_years(s: str | None, cfg: dict) -> list[int]:
+    """Parse years from values like "2025 2026", "2025,2026" or "1995-2026"."""
     if s:
-        years = [int(x) for x in s.replace(",", " ").split() if x.strip()]
+        years: list[int] = []
+        for token in s.replace(",", " ").split():
+            token = token.strip()
+            if not token:
+                continue
+            if "-" in token:
+                a, b = token.split("-", 1)
+                a_i, b_i = int(a), int(b)
+                if b_i < a_i:
+                    a_i, b_i = b_i, a_i
+                years.extend(range(a_i, b_i + 1))
+            else:
+                years.append(int(token))
     else:
         a = int(cfg["analysis"].get("min_year", datetime.now().year - 1))
         b = int(cfg["analysis"].get("max_year", datetime.now().year))
         years = list(range(a, b + 1))
     return sorted(set(years))
 
-
 def normalise_prefixes(s: str | None, cfg: dict) -> list[str]:
     if s:
         vals = [x.strip().upper().replace(" ", "") for x in s.replace(",", " ").split() if x.strip()]
     else:
         vals = [str(x).upper().replace(" ", "") for x in cfg["analysis"].get("postcode_prefixes", ["BN"])]
+    if any(v in {"ALL", "*", "EW", "ENGLANDWALES"} for v in vals):
+        return ["ALL"]
     return vals or ["BN"]
 
+
+def prefixes_label(prefixes: list[str]) -> str:
+    return "England_Wales" if prefixes == ["ALL"] else "_".join(prefixes)
 
 def download_file(url: str, dest: Path, timeout: int = 60) -> bool:
     print(f"Trying download: {url}")
@@ -120,6 +138,7 @@ def ensure_year_csv(year: int, cfg: dict, raw_dir: Path) -> Path:
 
 
 def load_filter_year(csv_path: Path, prefixes: list[str], standard_only: bool) -> pd.DataFrame:
+    all_mode = prefixes == ["ALL"]
     wanted_prefix = tuple(prefixes)
     chunks = []
     usecols = list(range(len(PPD_COLUMNS)))
@@ -148,16 +167,25 @@ def load_filter_year(csv_path: Path, prefixes: list[str], standard_only: bool) -
         chunksize=200_000,
     ):
         chunk["postcode_clean"] = chunk["postcode"].fillna("").str.upper().str.replace(" ", "", regex=False)
-        mask = chunk["postcode_clean"].str.startswith(wanted_prefix)
+        if all_mode:
+            mask = pd.Series(True, index=chunk.index)
+        else:
+            mask = chunk["postcode_clean"].str.startswith(wanted_prefix)
         if standard_only:
             mask &= chunk["ppd_category_type"].fillna("").eq("A")
         chunk = chunk.loc[mask].copy()
         if len(chunk):
             chunks.append(chunk)
     if not chunks:
-        return pd.DataFrame(columns=PPD_COLUMNS + ["postcode_clean"])
+        empty_cols = PPD_COLUMNS + [
+            "postcode_clean", "year", "month", "week", "postcode_district",
+            "property_type_label", "duration_label", "old_new_label"
+        ]
+        return pd.DataFrame(columns=empty_cols)
     df = pd.concat(chunks, ignore_index=True)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["transfer_date"] = pd.to_datetime(df["transfer_date"], errors="coerce")
+    df = df.dropna(subset=["transfer_date", "price"])
     df["year"] = df["transfer_date"].dt.year
     df["month"] = df["transfer_date"].dt.to_period("M").astype(str)
     df["week"] = df["transfer_date"].dt.to_period("W").astype(str)
@@ -166,7 +194,6 @@ def load_filter_year(csv_path: Path, prefixes: list[str], standard_only: bool) -
     df["duration_label"] = df["duration"].map(DURATION).fillna(df["duration"])
     df["old_new_label"] = df["old_new"].map(OLD_NEW).fillna(df["old_new"])
     return df
-
 
 def agg_stats(g: pd.core.groupby.generic.DataFrameGroupBy) -> pd.DataFrame:
     return g["price"].agg(
@@ -187,9 +214,18 @@ def make_outputs(df: pd.DataFrame, out_dir: Path, high_value_threshold: int, top
     mkdirs(out_dir)
     outputs = {}
     if df.empty:
-        for name in ["summary_by_year", "summary_by_month", "summary_by_week", "summary_by_postcode_district", "summary_by_property_type_year", "latest_sales", "high_value_sales"]:
+        empty_tables = {
+            "summary_by_year": ["year", "transactions", "total_value", "mean_price", "median_price", "min_price", "max_price", "median_yoy_pct", "transactions_yoy_pct"],
+            "summary_by_month": ["month", "transactions", "total_value", "mean_price", "median_price", "min_price", "max_price", "median_mom_pct", "transactions_mom_pct"],
+            "summary_by_week": ["week", "transactions", "total_value", "mean_price", "median_price", "min_price", "max_price", "median_wow_pct", "transactions_wow_pct"],
+            "summary_by_postcode_district": ["postcode_district", "transactions", "total_value", "mean_price", "median_price", "min_price", "max_price"],
+            "summary_by_property_type_year": ["year", "property_type_label", "transactions", "total_value", "mean_price", "median_price", "min_price", "max_price"],
+            "latest_sales": ["transfer_date", "price", "postcode", "property_type_label", "old_new_label", "duration_label", "paon", "saon", "street", "locality", "town_city", "district", "county"],
+            "high_value_sales": ["transfer_date", "price", "postcode", "property_type_label", "old_new_label", "duration_label", "paon", "saon", "street", "town_city", "district", "county"],
+        }
+        for name, cols in empty_tables.items():
             path = out_dir / f"{name}.csv"
-            pd.DataFrame().to_csv(path, index=False)
+            pd.DataFrame(columns=cols).to_csv(path, index=False)
             outputs[name] = path
         return outputs
 
@@ -286,7 +322,10 @@ def write_site(df: pd.DataFrame, reports: dict[str, Path], cfg: dict, prefixes: 
     def read(name):
         p = reports.get(name)
         if p and p.exists() and p.stat().st_size:
-            return pd.read_csv(p)
+            try:
+                return pd.read_csv(p)
+            except EmptyDataError:
+                return pd.DataFrame()
         return pd.DataFrame()
 
     y = read("summary_by_year")
@@ -476,7 +515,7 @@ def main() -> int:
         elif not csv_path.exists():
             raise FileNotFoundError(f"Missing {csv_path} while --skip-download was set.")
         df_year = load_filter_year(csv_path, prefixes, standard_only)
-        out_parquet = processed_dir / f"pp_{'_'.join(prefixes).lower()}_standard_{year}.parquet"
+        out_parquet = processed_dir / f"pp_{prefixes_label(prefixes).lower()}_standard_{year}.parquet"
         try:
             df_year.to_parquet(out_parquet, index=False)
             year_output = str(out_parquet)
@@ -491,7 +530,7 @@ def main() -> int:
 
     df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not df.empty:
-        all_parquet = processed_dir / f"pp_{'_'.join(prefixes).lower()}_standard_all_years.parquet"
+        all_parquet = processed_dir / f"pp_{prefixes_label(prefixes).lower()}_standard_all_years.parquet"
         try:
             df.to_parquet(all_parquet, index=False)
         except Exception as exc:
