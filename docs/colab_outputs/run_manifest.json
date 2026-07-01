@@ -1,0 +1,17 @@
+{
+  "project": "Addresses26",
+  "run_utc": "2026-04-27T11:21:06.781409+00:00",
+  "source": "HM Land Registry Price Paid Data yearly CSV files",
+  "postcode_prefix": "BN",
+  "standard_only": true,
+  "rows": 535781,
+  "outputs": {
+    "all_years_parquet": "/content/drive/MyDrive/Addresses26_Data/derived/land_registry_price_paid/pp_bn_standard_all_years.parquet",
+    "all_years_csv": "/content/drive/MyDrive/Addresses26_Data/derived/land_registry_price_paid/pp_bn_standard_all_years.csv",
+    "summary_by_year": "/content/drive/MyDrive/Addresses26_Colab/reports/summary_by_year.csv",
+    "summary_by_postcode_district": "/content/drive/MyDrive/Addresses26_Colab/reports/summary_by_postcode_district.csv",
+    "summary_by_property_type_year": "/content/drive/MyDrive/Addresses26_Colab/reports/summary_by_property_type_year.csv",
+    "manifest_index": "/content/drive/MyDrive/Addresses26_Data/manifests/pp_bn_standard_manifest_index.csv"
+  },
+  "attribution": "Contains HM Land Registry data \u00a9 Crown copyright and database right. Licensed under the Open Government Licence v3.0."
+}

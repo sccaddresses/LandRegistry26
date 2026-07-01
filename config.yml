@@ -1,0 +1,25 @@
+project:
+  name: LandRegistry26
+  title: UK Land Registry Intelligence
+  site_url: ""
+  description: Weekly UK property sales intelligence from HM Land Registry Price Paid Data.
+
+analysis:
+  postcode_prefixes: ["BN"]
+  standard_only: true
+  min_year: 2025
+  max_year: 2026
+  high_value_threshold: 1000000
+  min_transactions_for_signal: 3
+  top_n: 15
+
+source:
+  # The script tries these URL patterns in order.
+  yearly_csv_url_patterns:
+    - "https://price-paid-data.publicdata.landregistry.gov.uk/pp-{year}.csv"
+    - "http://prod.publicdata.landregistry.gov.uk.s3-website-eu-west-1.amazonaws.com/pp-{year}.csv"
+
+site:
+  output_dir: site
+  brand: LandRegistry26
+  footer_attribution: "Contains HM Land Registry data © Crown copyright and database right. This data is licensed under the Open Government Licence v3.0."
